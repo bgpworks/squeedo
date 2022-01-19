@@ -14,7 +14,7 @@
   "Functions for using Amazon Simple Queueing Service to request and perform
   computation."
   (:require
-    [clojure.core.async :refer [close! go-loop go thread >! <! <!! chan buffer onto-chan timeout]]
+    [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer onto-chan timeout]]
     [clojure.core.async.impl.protocols :refer [closed?]]
     [clojure.tools.logging :as log]
     [com.climate.squeedo.sqs :as sqs]))
@@ -65,31 +65,61 @@
             (recur)))))
     [message-chan buf]))
 
+(defn- wait-all-close
+  "Returns a channel that closes when all the given channels have closed."
+  [chans]
+  (let [co (async/chan 1 (filter nil?))]
+    (async/pipe (async/merge chans)
+                co)
+    co))
+
 (defn- worker
   [work-token-chan message-chan compute done-chan]
   (go-loop []
     (>! work-token-chan :token)
     (when-let [message (<! message-chan)]
-      (try
-        (compute message done-chan)
-        (catch Throwable _
-          (>! done-chan (assoc message :nack true))))
+      (let [res-chan (chan 1)]
+        (try
+          (compute message res-chan)
+          (catch Throwable _
+            (>! res-chan (assoc message :nack true))))
+        (>! done-chan res-chan))
       (recur))))
+
+(defn- worker-pool
+  "Returns a channel that closes when all workers are returned.
+  It may not mean that all jobs are done, as a worker may dispatch a asynchronous job."
+  [worker-size work-token-chan message-chan compute done-chan]
+  (-> (repeatedly worker-size
+                  (fn []
+                    (worker work-token-chan message-chan compute done-chan)))
+      (vec)
+      (wait-all-close)))
 
 (defn- acker
   [connection work-token-chan done-chan]
   (go-loop []
-    (when-let [message (<! done-chan)]
-      ; free up the work-token-chan
+    (when-let [message-ch (<! done-chan)]
+      ;; free up the work-token-chan
       (<! work-token-chan)
-      ; (n)ack the message asynchronously
-      (let [nack (:nack message)]
-        (go
+      ;; (n)ack the message
+      (when-let [message (<! message-ch)]
+        (let [nack (:nack message)]
           (cond
             (integer? nack) (sqs/nack connection message (:nack message))
             nack            (sqs/nack connection message)
-            :else           (sqs/ack connection message))))
+            :else           (sqs/ack connection message)))
+        (close! message-ch))
       (recur))))
+
+(defn- acker-pool
+  "Returns a channel that closes when all jobs pushed to `done-chan` are reported to SQS."
+  [connection worker-size work-token-chan done-chan]
+  (-> (repeatedly worker-size
+                  (fn []
+                    (acker connection work-token-chan done-chan)))
+      (vec)
+      (wait-all-close)))
 
 (defn- create-workers
   "Create workers to run the compute function. Workers are expected to be CPU bound or handle all IO in an asynchronous
@@ -97,12 +127,17 @@
   threadpool."
   [connection worker-size max-concurrent-work message-chan compute]
   (let [done-chan (chan worker-size)
-        ; the work-token-channel ensures we only have a fixed numbers of messages processed at one time
-        work-token-chan (chan max-concurrent-work)]
-    (dotimes [_ worker-size]
-      (worker work-token-chan message-chan compute done-chan))
-    (acker connection work-token-chan done-chan)
-    done-chan))
+        ;; the work-token-channel ensures we only have a fixed numbers of messages processed at one time
+        work-token-chan (chan max-concurrent-work)
+        worker-done-chan (worker-pool worker-size work-token-chan message-chan compute done-chan)
+        ack-done-chan (acker-pool connection worker-size work-token-chan done-chan)]
+    ;; close done-chan when all workers are returned.
+    (async/go-loop []
+      (if (nil? (<! worker-done-chan))
+        (async/close! done-chan)
+        (recur)))
+    {:done-chan done-chan
+     :ack-done-chan ack-done-chan}))
 
 (defn- ->options-map
   "If options are provided as a map, return it as-is; otherwise, the options are provided as varargs and must be
@@ -193,8 +228,10 @@
     :exceptional-poll-delay-ms - when an Exception is received while polling, the number of ms we wait until polling
                                  again.  Default is 10000 (10 seconds).
    Output:
-    a map with keys, :done-channel    - the channel to send messages to be acked
-                     :message-channel - unused by the client."
+    a map with keys, :done-channel      - the channel to send messages to be acked
+                     :message-channel   - unused by the client.
+                     :ack-done-channel  - the channel closes when all messages are acked.
+  "
   [queue-name compute & opts]
   (let [options (->options-map opts)
         _ (dead-letter-deprecation-warning options)
@@ -210,9 +247,11 @@
                              connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms)
                            (create-queue-listeners
                              connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms))
-        done-chan (create-workers
-                    connection worker-count max-concurrent-work message-chan compute)]
-    {:done-channel done-chan :message-channel message-chan}))
+        worker-chans (create-workers
+                      connection worker-count max-concurrent-work message-chan compute)]
+    {:done-channel (:done-chan worker-chans)
+     :ack-done-channel (:ack-done-chan worker-chans)
+     :message-channel message-chan}))
 
 (defn stop-consumer
   "Takes a consumer created by start-consumer and closes the channels.
@@ -220,3 +259,14 @@
   [{:keys [done-channel message-channel]}]
   (close! message-channel)
   (close! done-channel))
+
+(defn graceful-stop-consumer
+  "Takes a consumer created by start-consumer and tries to stop it.
+  Wait at most `timeout-ms` until the consumer has come to a complete stop.
+  Returns the result (:timed-out or :finished)."
+  [{:keys [ack-done-channel message-channel]} timeout-ms]
+  (close! message-channel)
+  (let [timeout-ch (async/timeout timeout-ms)]
+    (async/alt!!
+      timeout-ch :timed-out
+      ack-done-channel :finished)))

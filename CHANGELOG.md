@@ -1,3 +1,13 @@
+## 1.1.4 (Jan 19, 2022)
+
+* **BREAKING**
+  * `(:done-channel (com.climate.squeedo.sqs-consumer/start-consumer))` now returns a channel contains message-returning channels instead of messages.
+* Add `com.climate.squeedo.sqs-consumer/graceful-stop-consumer` to support graceful shutdown.
+
+## 1.1.3 (Jan 11, 2022)
+
+* update underlying dependencies
+
 ## 1.1.2 (May 29, 2019)
 
 * update sqs namespace to use the AmazonSQS interface rather than the implementation class AmazonSqsClient

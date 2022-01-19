@@ -7,12 +7,12 @@ in its raw format, so it's up to the caller to determine the proper reader for t
 
 ## Latest version
 
-[![Clojars Project](http://clojars.org/com.climate/squeedo/latest-version.svg)](http://clojars.org/com.climate/squeedo)
+[![Clojars Project](https://img.shields.io/clojars/v/org.clojars.bgpworks/squeedo.svg)](https://clojars.org/org.clojars.bgpworks/squeedo)
 
 ## Changes
 
-Version `1.0.0` features breaking changes to queue connection and configuration.
-See [CHANGELOG](https://github.com/TheClimateCorporation/squeedo/blob/master/CHANGELOG.md) for release notes.
+Version `1.1.4` features breaking changes to return value of `com.climate.squeedo.sqs-consumer/start-consumer`.
+See [CHANGELOG](https://github.com/bgpworks/squeedo/blob/master/CHANGELOG.md) for release notes.
 
 ## Inspiration
 
