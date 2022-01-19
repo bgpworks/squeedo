@@ -176,8 +176,15 @@
     (log/infof "Using SQS queue %s at %s" queue-name queue-url)
     {:client client
      :queue-name queue-name
-     :queue-url queue-url}))
+     :queue-url queue-url
+     :default-client? (not= (:client options)
+                            client)}))
 
+(defn shutdown-default-client
+  "Shuts down SQS client object if it was automaticalled created."
+  [{:keys [^AmazonSQS client default-client?]}]
+  (when default-client?
+    (.shutdown client)))
 
 ;;;;;;;;;;
 ;; message

@@ -3,6 +3,7 @@
 * **BREAKING**
   * `(:done-channel (com.climate.squeedo.sqs-consumer/start-consumer))` now returns a channel contains message-returning channels instead of messages.
 * Add `com.climate.squeedo.sqs-consumer/graceful-stop-consumer` to support graceful shutdown.
+* When stopping consumer, destroy an internal SQS client if it was automatically created.
 
 ## 1.1.3 (Jan 11, 2022)
 

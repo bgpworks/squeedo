@@ -251,22 +251,26 @@
                       connection worker-count max-concurrent-work message-chan compute)]
     {:done-channel (:done-chan worker-chans)
      :ack-done-channel (:ack-done-chan worker-chans)
+     :connection connection
      :message-channel message-chan}))
 
 (defn stop-consumer
   "Takes a consumer created by start-consumer and closes the channels.
   This should be called to stopped consuming messages."
-  [{:keys [done-channel message-channel]}]
+  [{:keys [done-channel message-channel connection]}]
   (close! message-channel)
-  (close! done-channel))
+  (close! done-channel)
+  (sqs/shutdown-default-client connection))
 
 (defn graceful-stop-consumer
   "Takes a consumer created by start-consumer and tries to stop it.
   Wait at most `timeout-ms` until the consumer has come to a complete stop.
   Returns the result (:timed-out or :finished)."
-  [{:keys [ack-done-channel message-channel]} timeout-ms]
+  [{:keys [ack-done-channel message-channel connection]} timeout-ms]
   (close! message-channel)
   (let [timeout-ch (async/timeout timeout-ms)]
     (async/alt!!
       timeout-ch :timed-out
-      ack-done-channel :finished)))
+      ack-done-channel (do
+                         (sqs/shutdown-default-client connection)
+                         :finished))))
