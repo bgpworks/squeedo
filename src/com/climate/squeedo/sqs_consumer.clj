@@ -123,14 +123,79 @@
 
 (defn- create-workers
   "Create workers to run the compute function. Workers are expected to be CPU bound or handle all IO in an asynchronous
-  manner. In the future we may add an option to run computes in a thread/pool that isn't part of the core.async's
-  threadpool."
+  manner. "
   [connection worker-size max-concurrent-work message-chan compute]
   (let [done-chan (chan worker-size)
         ;; the work-token-channel ensures we only have a fixed numbers of messages processed at one time
         work-token-chan (chan max-concurrent-work)
         worker-done-chan (worker-pool worker-size work-token-chan message-chan compute done-chan)
         ack-done-chan (acker-pool connection worker-size work-token-chan done-chan)]
+    ;; close done-chan when all workers are returned.
+    (async/go-loop []
+      (if (nil? (<! worker-done-chan))
+        (async/close! done-chan)
+        (recur)))
+    {:done-chan done-chan
+     :ack-done-chan ack-done-chan}))
+
+(defn- dedicated-worker [message-chan compute done-chan]
+  (let [finish-chan (chan)]
+    (thread
+      (loop []
+        (when-let [message (<!! message-chan)]
+          (let [res-chan (chan 1)]
+            (try
+              (compute message res-chan)
+              (catch Throwable _
+                (async/>!! res-chan (assoc message :nack true))))
+            ;; may use put! not to block here. but what's the good point of processing another jobs when reporting is delaying.
+            (async/>!! done-chan res-chan))
+          (recur)))
+      (close! finish-chan))
+    finish-chan))
+
+(defn- dedicated-worker-pool [worker-size message-chan compute done-chan]
+  (-> (repeatedly worker-size
+                  (fn []
+                    (dedicated-worker message-chan compute done-chan)))
+      (vec)
+      (wait-all-close)))
+
+(defn- dedicated-acker
+  [connection done-chan]
+  (let [finish-chan (chan)]
+    (thread
+      (loop []
+        (when-let [message-ch (async/<!! done-chan)]
+          ;; (n)ack the message
+          (when-let [message (async/<!! message-ch)]
+            (let [nack (:nack message)]
+              (cond
+                (integer? nack) (sqs/nack connection message (:nack message))
+                nack            (sqs/nack connection message)
+                :else           (sqs/ack connection message)))
+            (close! message-ch))
+          (recur)))
+      (close! finish-chan))
+    finish-chan))
+
+(defn- dedicated-acker-pool
+  "Returns a channel that closes when all jobs pushed to `done-chan` are reported to SQS."
+  [connection worker-size done-chan]
+  (-> (repeatedly worker-size
+                  (fn []
+                    (dedicated-acker connection done-chan)))
+      (vec)
+      (wait-all-close)))
+
+(defn- create-dedicated-workers
+  "Create workers to run the compute function. It does not respect `worker-size` parameter and only respect `max-concurrent-work` for implemetation simplicity"
+  [connection worker-count max-concurrent-work message-chan compute]
+  (let [done-chan (chan worker-count)
+        worker-done-chan (dedicated-worker-pool max-concurrent-work message-chan compute done-chan)
+        ;; TODO: convert back to non-dedicated-acker-pool
+        acker-pool-size 2
+        ack-done-chan (dedicated-acker-pool connection acker-pool-size done-chan)]
     ;; close done-chan when all workers are returned.
     (async/go-loop []
       (if (nil? (<! worker-done-chan))
@@ -195,6 +260,10 @@
            " has been removed. Please use com.climate.squeedo.sqs/configure to configure an SQS"
            " dead letter queue."))))
 
+(defn- get-worker-threads
+  [options]
+  (or (:worker-threads? options) false))
+
 (defn start-consumer
   "Creates a consumer that reads messages as quickly as possible into a local buffer up
    to the configured buffer size.
@@ -227,6 +296,7 @@
     :client                    - the SQS client to use (if missing, sqs/mk-connection will create a client)
     :exceptional-poll-delay-ms - when an Exception is received while polling, the number of ms we wait until polling
                                  again.  Default is 10000 (10 seconds).
+    :worker-threads?           - run workers in dedicated threads; if true, will create one thread per worker
    Output:
     a map with keys, :done-channel      - the channel to send messages to be acked
                      :message-channel   - unused by the client.
@@ -247,8 +317,11 @@
                              connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms)
                            (create-queue-listeners
                              connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms))
-        worker-chans (create-workers
-                      connection worker-count max-concurrent-work message-chan compute)]
+        worker-chans (if (get-worker-threads options)
+                       (create-dedicated-workers
+                        connection worker-count max-concurrent-work message-chan compute)
+                       (create-workers
+                        connection worker-count max-concurrent-work message-chan compute))]
     {:done-channel (:done-chan worker-chans)
      :ack-done-channel (:ack-done-chan worker-chans)
      :connection connection

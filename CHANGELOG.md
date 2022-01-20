@@ -1,9 +1,11 @@
-## 1.1.4 (Jan 19, 2022)
+## 1.1.4 (Jan 20, 2022)
 
 * **BREAKING**
   * `(:done-channel (com.climate.squeedo.sqs-consumer/start-consumer))` now returns a channel contains message-returning channels instead of messages.
 * Add `com.climate.squeedo.sqs-consumer/graceful-stop-consumer` to support graceful shutdown.
 * When stopping consumer, destroy an internal SQS client if it was automatically created.
+* Introduces new configuration option: `:worker-threads?` - run workers in dedicated threads; if true, will create one thread per worker.
+  Calculating worker job and reporting with a blocking SQS client in core.async threads may cause dead lock, as there are only limited number of core.async threads. (default to 8).
 
 ## 1.1.3 (Jan 11, 2022)
 
