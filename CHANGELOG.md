@@ -1,3 +1,6 @@
+## 1.1.4 (Jan 23, 2022)
+* `com.climate.squeedo.sqs-consumer/stop-consumer` waits internal SQS message listeners to finish ongoing polling to avoid message loss. It also ensures that the underlying SQS client is not used anymore so that the caller can safely close the SQS client.
+
 ## 1.1.4 (Jan 20, 2022)
 
 * **BREAKING**

@@ -14,10 +14,81 @@
   "Functions for using Amazon Simple Queueing Service to request and perform
   computation."
   (:require
-    [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer onto-chan timeout]]
-    [clojure.core.async.impl.protocols :refer [closed?]]
+    [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer timeout]]
     [clojure.tools.logging :as log]
     [com.climate.squeedo.sqs :as sqs]))
+
+(defn- onto-chan-ret!
+  "like core.async/onto-chan! except that
+   a) not closing ch and
+   b) value of returning channel is true unless ch is already closed."
+  [ch coll]
+  (go-loop [vs (seq coll)]
+    (if vs
+      (if (>! ch (first vs))
+        (recur (next vs))
+        ;; closed
+        false)
+      ;; all pushed.
+      true)))
+
+(defn- wait-all-close
+  "Returns a channel that closes when all the given channels have closed."
+  [chans]
+  (let [co (async/chan 1 (filter nil?))]
+    (async/pipe (async/merge chans)
+                co)
+    co))
+
+(defn- close-on-close!
+  "Close `ch-to-close` once `watch-ch` is closed."
+  [watch-ch ch-to-close]
+  (async/go-loop []
+    (if (nil? (<! watch-ch))
+      (close! ch-to-close)
+      (recur))))
+
+(defn- dequeue [connection dequeue-limit]
+  (try
+    [nil (sqs/dequeue* connection :limit dequeue-limit)]
+    (catch Throwable t
+      [t nil])))
+
+(defn- queue-listener [connection dequeue-limit exceptional-poll-delay-ms message-chan is-stopped-fn]
+  (go-loop []
+    (let [[err messages] (dequeue connection dequeue-limit)]
+      (if err
+        (if (is-stopped-fn)
+          (log/error err "Encountered exception dequeueing.")
+          (do
+            (log/errorf err "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
+            (<! (timeout exceptional-poll-delay-ms))
+            (recur)))
+        (when (and (<! (onto-chan-ret! message-chan messages))
+                   (not (is-stopped-fn)))
+          (recur))))))
+
+(defn- queue-listener-pool [num-listeners create-listener-fn]
+  (-> (repeatedly num-listeners
+                  create-listener-fn)
+      (vec)
+      (wait-all-close)))
+
+(defn- create-queue-helper [buffer-size num-listeners create-listener-fn]
+  (let [stopped?_ (atom false)
+        is-stopped-fn (fn []
+                        @stopped?_)
+        stop-fn (fn []
+                  (reset! stopped?_ true))
+        buf (buffer buffer-size)
+        message-chan (chan buf)
+        listener-done-chan (queue-listener-pool num-listeners
+                                                (fn []
+                                                  (create-listener-fn message-chan
+                                                                      is-stopped-fn)))]
+    ;; close message-chan when all listeners are returned.
+    (close-on-close! listener-done-chan message-chan)
+    [message-chan buf stop-fn]))
 
 (defn- create-queue-listeners
   "Kick off listeners in the background that eagerly grab messages as quickly as possible and fetch them into a buffered
@@ -28,20 +99,28 @@
 
   If there is an Exception while trying to poll for messages, wait exceptional-poll-delay-ms before trying again."
   [connection num-listeners buffer-size dequeue-limit exceptional-poll-delay-ms]
-  (let [buf (buffer buffer-size)
-        message-chan (chan buf)]
-    (dotimes [_ num-listeners]
-      (go-loop []
-        (try
-          (let [messages (sqs/dequeue* connection :limit dequeue-limit)]
-            ; park until all messages are put onto message-channel
-            (<! (onto-chan message-chan messages false)))
-          (catch Throwable t
-            (log/errorf t "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
-            (<! (timeout exceptional-poll-delay-ms))))
-        (when (not (closed? message-chan))
-          (recur))))
-    [message-chan buf]))
+  (create-queue-helper buffer-size
+                       num-listeners
+                       (fn [message-chan is-stopped-fn]
+                         (queue-listener connection dequeue-limit exceptional-poll-delay-ms message-chan is-stopped-fn))))
+
+(defn- dedicated-queue-listener [connection dequeue-limit exceptional-poll-delay-ms message-chan is-stopped-fn]
+  (let [finish-chan (chan)]
+    (thread
+      (loop []
+        (let [[err messages] (dequeue connection dequeue-limit)]
+          (if err
+            (if (is-stopped-fn)
+              (log/error err "Encountered exception dequeueing.")
+              (do
+                (log/errorf err "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
+                (Thread/sleep exceptional-poll-delay-ms)
+                (recur)))
+            (when (and (<!! (onto-chan-ret! message-chan messages))
+                       (not (is-stopped-fn)))
+              (recur)))))
+      (close! finish-chan))
+    finish-chan))
 
 (defn- create-dedicated-queue-listeners
   "Similar to `create-queue-listeners` but listeners are created on dedicated threads and will be blocked when the
@@ -49,29 +128,10 @@
 
   If there is an Exception while trying to poll for messages, wait exceptional-poll-delay-ms before trying again."
   [connection num-listeners buffer-size dequeue-limit exceptional-poll-delay-ms]
-  (let [buf (buffer buffer-size)
-        message-chan (chan buf)]
-    (dotimes [_ num-listeners]
-      (thread
-        (loop []
-          (try
-            (let [messages (sqs/dequeue* connection :limit dequeue-limit)]
-              ; block until all messages are put onto message-channel
-              (<!! (onto-chan message-chan messages false)))
-            (catch Throwable t
-              (log/errorf t "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
-              (Thread/sleep exceptional-poll-delay-ms)))
-          (when (not (closed? message-chan))
-            (recur)))))
-    [message-chan buf]))
-
-(defn- wait-all-close
-  "Returns a channel that closes when all the given channels have closed."
-  [chans]
-  (let [co (async/chan 1 (filter nil?))]
-    (async/pipe (async/merge chans)
-                co)
-    co))
+  (create-queue-helper buffer-size
+                       num-listeners
+                       (fn [message-chan is-stopped-fn]
+                         (dedicated-queue-listener connection dequeue-limit exceptional-poll-delay-ms message-chan is-stopped-fn))))
 
 (defn- worker
   [work-token-chan message-chan compute done-chan]
@@ -131,10 +191,7 @@
         worker-done-chan (worker-pool worker-size work-token-chan message-chan compute done-chan)
         ack-done-chan (acker-pool connection worker-size work-token-chan done-chan)]
     ;; close done-chan when all workers are returned.
-    (async/go-loop []
-      (if (nil? (<! worker-done-chan))
-        (async/close! done-chan)
-        (recur)))
+    (close-on-close! worker-done-chan done-chan)
     {:done-chan done-chan
      :ack-done-chan ack-done-chan}))
 
@@ -197,10 +254,7 @@
         acker-pool-size 2
         ack-done-chan (dedicated-acker-pool connection acker-pool-size done-chan)]
     ;; close done-chan when all workers are returned.
-    (async/go-loop []
-      (if (nil? (<! worker-done-chan))
-        (async/close! done-chan)
-        (recur)))
+    (close-on-close! worker-done-chan done-chan)
     {:done-chan done-chan
      :ack-done-chan ack-done-chan}))
 
@@ -277,8 +331,6 @@
 
    Failed messages will currently not be acked, but rather go back on for redelivery after the timeout.
 
-   This code is atom free :)
-
    Input:
     queue-name - the name of an sqs queue
     compute - a compute function that takes two args: a 'message' containing the body of the sqs
@@ -312,11 +364,12 @@
         max-concurrent-work (get-max-concurrent-work worker-count options)
         dequeue-limit (get-dequeue-limit options)
         exceptional-poll-delay-ms (get-exceptional-poll-delay-ms options)
-        [message-chan _] (if (get-listener-threads options)
-                           (create-dedicated-queue-listeners
-                             connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms)
-                           (create-queue-listeners
-                             connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms))
+        [message-chan _ stop-listener-fn]
+        (if (get-listener-threads options)
+          (create-dedicated-queue-listeners
+           connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms)
+          (create-queue-listeners
+           connection listener-count message-chan-size dequeue-limit exceptional-poll-delay-ms))
         worker-chans (if (get-worker-threads options)
                        (create-dedicated-workers
                         connection worker-count max-concurrent-work message-chan compute)
@@ -325,25 +378,26 @@
     {:done-channel (:done-chan worker-chans)
      :ack-done-channel (:ack-done-chan worker-chans)
      :connection connection
-     :message-channel message-chan}))
+     :message-channel message-chan
+     :stop-listener-fn stop-listener-fn}))
 
 (defn stop-consumer
   "Takes a consumer created by start-consumer and closes the channels.
-  This should be called to stopped consuming messages."
-  [{:keys [done-channel message-channel connection]}]
-  (close! message-channel)
-  (close! done-channel)
-  (sqs/shutdown-default-client connection))
+  This should be called to stop consuming messages.
+  Returns a channel that will close when all ongoing jobs are finished."
+  [{:keys [ack-done-channel connection stop-listener-fn]}]
+  (stop-listener-fn)
+  (async/go
+    (<! ack-done-channel)
+    (sqs/shutdown-default-client connection)))
 
 (defn graceful-stop-consumer
   "Takes a consumer created by start-consumer and tries to stop it.
   Wait at most `timeout-ms` until the consumer has come to a complete stop.
   Returns the result (:timed-out or :finished)."
-  [{:keys [ack-done-channel message-channel connection]} timeout-ms]
-  (close! message-channel)
-  (let [timeout-ch (async/timeout timeout-ms)]
+  [consumer timeout-ms]
+  (let [timeout-ch (async/timeout timeout-ms)
+        stopped-ch (stop-consumer consumer)]
     (async/alt!!
       timeout-ch :timed-out
-      ack-done-channel (do
-                         (sqs/shutdown-default-client connection)
-                         :finished))))
+      stopped-ch :finished)))
