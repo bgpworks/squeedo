@@ -154,11 +154,12 @@
     (with-redefs [sqs/ack (fn [_ _] (swap! tracker inc))]
       (let [num-messages 4
             message-channel (chan (buffer num-messages))
-            done-channel (#'sqs-server/create-workers nil 2 2 message-channel slow-compute)]
+            chans (#'sqs-server/create-workers nil 2 2 message-channel slow-compute)]
         (doseq [_ (range num-messages)] (>!! message-channel "ignored"))
         (wait-for-messages num-messages 60000)
         (close! message-channel)
-        (close! done-channel)))))
+        (close! (:done-chan chans))
+        (close! (:ack-done-chan chans))))))
 
 (deftest verify-opts-to-start-consumer
   (with-redefs [sqs/mk-connection (fn [& _] {:client     "client"
