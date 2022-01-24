@@ -1,4 +1,8 @@
-## 1.1.4 (Jan 23, 2022)
+## 1.1.6 (Jan 24, 2022)
+* **BREAKING**
+  * delete `com.climate.squeedo.sqs-consumer/graceful-stop-consumer`. Use `com.climate.squeedo.sqs-consumer/graceful-stop-consumer!` or `com.climate.squeedo.sqs-consumer/graceful-stop-consumer!!` instead.
+
+## 1.1.5 (Jan 23, 2022)
 * `com.climate.squeedo.sqs-consumer/stop-consumer` waits internal SQS message listeners to finish ongoing polling to avoid message loss. It also ensures that the underlying SQS client is not used anymore so that the caller can safely close the SQS client.
 
 ## 1.1.4 (Jan 20, 2022)

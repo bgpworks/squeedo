@@ -391,10 +391,20 @@
     (<! ack-done-channel)
     (sqs/shutdown-default-client connection)))
 
-(defn graceful-stop-consumer
+(defn graceful-stop-consumer!
   "Takes a consumer created by start-consumer and tries to stop it.
   Wait at most `timeout-ms` until the consumer has come to a complete stop.
   Returns the result (:timed-out or :finished)."
+  [consumer timeout-ms]
+  (let [timeout-ch (async/timeout timeout-ms)
+        stopped-ch (stop-consumer consumer)]
+    (async/go
+      (async/alt!
+        timeout-ch :timed-out
+        stopped-ch :finished))))
+
+(defn graceful-stop-consumer!!
+  "like graceful-stop-consumer!, but blocking way."
   [consumer timeout-ms]
   (let [timeout-ch (async/timeout timeout-ms)
         stopped-ch (stop-consumer consumer)]
