@@ -21,7 +21,10 @@
       MessageAttributeValue
       QueueDoesNotExistException
       ReceiveMessageRequest
-      SendMessageRequest)
+      SendMessageRequest
+      MessageNotInflightException
+      ReceiptHandleIsInvalidException
+      InvalidIdFormatException)
     (com.amazonaws.services.sqs
       AmazonSQS
       AmazonSQSClientBuilder)))
@@ -351,7 +354,14 @@
            ^String queue-url]}
    {:keys [^String receipt-handle]}]
   (log/debugf "Acking message %s" receipt-handle)
-  (.deleteMessage client queue-url receipt-handle))
+  (try
+    (.deleteMessage client queue-url receipt-handle)
+    (catch InvalidIdFormatException _
+      ;; The specified receipt handle isn't valid for the current version.
+      (log/warn "InvalidIdFormatException. Cannot retry it. Ignore it. receipt-handle:" receipt-handle))
+    (catch ReceiptHandleIsInvalidException _
+      ;; The specified receipt handle isn't valid
+      (log/warn "ReceiptHandleIsInvalidException. Cannot retry it. Ignore it. receipt-handle:" receipt-handle))))
 
 (defn nack
   "Put the message back on the queue.
@@ -368,4 +378,11 @@
     {:keys [^String receipt-handle]}
     nack-visibility-seconds]
    (log/debugf "Nacking message %s" receipt-handle)
-   (.changeMessageVisibility client queue-url receipt-handle (int nack-visibility-seconds))))
+   (try
+     (.changeMessageVisibility client queue-url receipt-handle (int nack-visibility-seconds))
+     (catch MessageNotInflightException _
+       ;; The specified message isn't in flight.
+       (log/warn "MessageNotInflightException. Message maybe done by other worker. Ignore it. receipt-handle:" receipt-handle))
+     (catch ReceiptHandleIsInvalidException _
+       ;; The specified receipt handle isn't valid.
+       (log/warn "ReceiptHandleIsInvalidException. Cannot retry it. Ignore it. receipt-handle:" receipt-handle)))))

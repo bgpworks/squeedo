@@ -1,6 +1,7 @@
 ## 1.1.7 (Jan 28, 2022)
 * Fix test code.
 * Fix regression bug: worker-pool did not respect `worker-count` for async jobs.
+* Fix bug: an exception from (n)ack blocks whole consumer.
 
 ## 1.1.6 (Jan 24, 2022)
 * **BREAKING**

@@ -156,6 +156,19 @@
       (vec)
       (wait-all-close)))
 
+(defn- try-ack
+  "Handle exception to keep acker running.
+  Need retry logic."
+  [connection message]
+  (try
+    (let [nack (:nack message)]
+      (cond
+        (integer? nack) (sqs/nack connection message (:nack message))
+        nack            (sqs/nack connection message)
+        :else           (sqs/ack connection message)))
+    (catch Exception ex
+      (log/error ex "Encountered exception acking."))))
+
 (defn- acker
   [connection work-token-chan done-chan]
   (go-loop []
@@ -166,11 +179,7 @@
         (<! work-token-chan)
         ;; (n)ack the message
         (when message
-          (let [nack (:nack message)]
-            (cond
-              (integer? nack) (sqs/nack connection message (:nack message))
-              nack            (sqs/nack connection message)
-              :else           (sqs/ack connection message)))
+          (try-ack connection message)
           (close! message-ch)))
       (recur))))
 
@@ -228,11 +237,7 @@
         (when-let [message-ch (async/<!! done-chan)]
           ;; (n)ack the message
           (when-let [message (async/<!! message-ch)]
-            (let [nack (:nack message)]
-              (cond
-                (integer? nack) (sqs/nack connection message (:nack message))
-                nack            (sqs/nack connection message)
-                :else           (sqs/ack connection message)))
+            (try-ack connection message)
             (close! message-ch))
           (recur)))
       (close! finish-chan))
