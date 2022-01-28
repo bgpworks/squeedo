@@ -233,10 +233,11 @@
                              :message-group-id "1234"
                              :message-deduplication-id "5678")
               msg (dequeue-1 connection)]
-          (is (= "1234" (.get (:attributes msg) "MessageGroupId")))
-          (is (= "5678" (.get (:attributes msg) "MessageDeduplicationId"))))
+          (is (= "1234" (.get ^java.util.Map (:attributes msg) "MessageGroupId")))
+          (is (= "5678" (.get ^java.util.Map (:attributes msg) "MessageDeduplicationId"))))
         (finally
-          (.deleteQueue (:client (sqs/mk-connection queue-name)) queue-name)
+          (let [connection (sqs/mk-connection queue-name)]
+            (sqs-extra/delete-queue (:client connection) (:queue-url connection)))
           (log/infof "Deleted testing queue %s" queue-name))))))
 
 (deftest ^:integration test-dead-letter-redrive
