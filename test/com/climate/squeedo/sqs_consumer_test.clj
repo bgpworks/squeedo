@@ -13,7 +13,7 @@
 (ns com.climate.squeedo.sqs-consumer-test
   (:require
     [clojure.test :refer :all]
-    [clojure.core.async :refer [<!! >!! put! close! buffer chan go >!]]
+    [clojure.core.async :as async :refer [<!! >!! put! close! buffer chan go >!]]
     [clojure.core.async.impl.protocols :as impl]
     [org.httpkit.client]
     [com.climate.squeedo.sqs :as sqs]
@@ -265,16 +265,21 @@
                                  {:id 1 :body "message"})
                   sqs/mk-connection (fn [& _] {})]
       (let [num-workers 4
+            blocker-ch (chan)
             consumer (sqs-server/start-consumer "queue-name"
-                                                (fn [_ _]
+                                                (fn [msg done-chan]
                                                   ; an intentionally bad consumer,
                                                   ; that forgets to ack back
-                                                  (swap! tracker inc))
+                                                  (swap! tracker inc)
+                                                  (async/go
+                                                    (async/<! blocker-ch)
+                                                    (async/>! done-chan msg)))
                                                 :num-workers num-workers)]
         (wait-for-messages num-workers 1000)
         ; wait a bit to make sure nothing else gets grabbed
         (Thread/sleep 200)
         (is (= @tracker num-workers))
+        (close! blocker-ch)
         (sqs-server/stop-consumer!! consumer)))))
 
 (defn- wait-for-close!! [ch]

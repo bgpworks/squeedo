@@ -160,16 +160,18 @@
   [connection work-token-chan done-chan]
   (go-loop []
     (when-let [message-ch (<! done-chan)]
-      ;; free up the work-token-chan
-      (<! work-token-chan)
-      ;; (n)ack the message
-      (when-let [message (<! message-ch)]
-        (let [nack (:nack message)]
-          (cond
-            (integer? nack) (sqs/nack connection message (:nack message))
-            nack            (sqs/nack connection message)
-            :else           (sqs/ack connection message)))
-        (close! message-ch))
+      ;; TODO: long running async job blocks whole workers.
+      (let [message (<! message-ch)]
+        ;; free up the work-token-chan
+        (<! work-token-chan)
+        ;; (n)ack the message
+        (when message
+          (let [nack (:nack message)]
+            (cond
+              (integer? nack) (sqs/nack connection message (:nack message))
+              nack            (sqs/nack connection message)
+              :else           (sqs/ack connection message)))
+          (close! message-ch)))
       (recur))))
 
 (defn- acker-pool
