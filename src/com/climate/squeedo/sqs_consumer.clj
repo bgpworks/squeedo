@@ -14,9 +14,9 @@
   "Functions for using Amazon Simple Queueing Service to request and perform
   computation."
   (:require
-    [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer timeout]]
-    [clojure.tools.logging :as log]
-    [com.climate.squeedo.sqs :as sqs]))
+   [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer timeout]]
+   [clojure.tools.logging :as log]
+   [com.climate.squeedo.sqs :as sqs]))
 
 (defn- onto-chan-ret!
   "like core.async/onto-chan! except that
@@ -390,6 +390,11 @@
   (async/go
     (<! ack-done-channel)
     (sqs/shutdown-default-client connection)))
+
+(defn stop-consumer!!
+  "Block until consumer stopped"
+  [consumer]
+  (async/<!! (stop-consumer consumer)))
 
 (defn graceful-stop-consumer!
   "Takes a consumer created by start-consumer and tries to stop it.

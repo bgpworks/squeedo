@@ -13,7 +13,8 @@
 (ns com.climate.squeedo.sqs-consumer-test
   (:require
     [clojure.test :refer :all]
-    [clojure.core.async :refer [<!! >!! <! put! timeout close! buffer chan go >!]]
+    [clojure.core.async :refer [<!! >!! put! close! buffer chan go >!]]
+    [clojure.core.async.impl.protocols :as impl]
     [org.httpkit.client]
     [com.climate.squeedo.sqs :as sqs]
     [com.climate.squeedo.test-utils :refer [with-temporary-queues]]
@@ -82,7 +83,9 @@
           _ (doseq [_ (range 4)]
               (>!! test-chan "ignored"))]
       (with-redefs [sqs/dequeue* (fn [& _] [(<!! test-chan)])]
-        (let [[message-chan buf] (#'sqs-server/create-queue-listeners nil 1 2 1 0)
+        (let [[message-chan
+               ^"clojure.core.async.impl.buffers.FixedBuffer" buf
+               stop-listener-fn] (#'sqs-server/create-queue-listeners nil 1 2 1 0)
               wait-and-check (fn [count]
                                (with-timeout 1000
                                              (while (< (.count buf) count)
@@ -95,7 +98,7 @@
           (wait-and-check 2)
           (is (false? (.full? buf)))
           (is (= 1 (.count buf)))
-          (close! message-chan)))))
+          (stop-listener-fn)))))
   (testing "Verify retry after specified ms"
     (let [test-chan (chan 10)
           _ (>!! test-chan "ignored")
@@ -106,11 +109,11 @@
                                      (throw (Exception. "thrown first time only")))
                                    [(<!! test-chan)])]
         (let [retry-ms 123
-              [message-chan _] (#'sqs-server/create-queue-listeners nil 1 2 1 retry-ms)
+              [message-chan _ stop-listener-fn] (#'sqs-server/create-queue-listeners nil 1 2 1 retry-ms)
               start-ms (System/currentTimeMillis)]
           (<!! message-chan)
           (is (>= (- (System/currentTimeMillis) start-ms) retry-ms))
-          (close! message-chan))))))
+          (stop-listener-fn))))))
 
 (deftest test-create-dedicated-queue-listeners
   (testing "Verify messages up to the buffer-size are retrieved"
@@ -120,7 +123,9 @@
                                      (do (reset! first-call false)
                                          ["msg1" "msg2" "msg3" "msg4"])
                                      []))]
-        (let [[message-chan buf] (#'sqs-server/create-dedicated-queue-listeners nil 1 2 1 0)
+        (let [[message-chan
+               ^"clojure.core.async.impl.buffers.FixedBuffer" buf
+               stop-listener-fn] (#'sqs-server/create-dedicated-queue-listeners nil 1 2 1 0)
               wait-and-check (fn [count]
                                (with-timeout 1000
                                              (while (< (.count buf) count)
@@ -133,21 +138,21 @@
           (wait-and-check 2)
           (is (false? (.full? buf)))
           (is (= 1 (.count buf)))
-          (close! message-chan)))))
+          (stop-listener-fn)))))
   (testing "Verify retry after specified ms"
     (let [call-number (atom 0)]
       (with-redefs [sqs/dequeue* (fn [& _]
                                    (swap! call-number inc)
-                                   (case @call-number
+                                   (case (long @call-number)
                                          1 (throw (Exception. "thrown first time only"))
                                          2 ["msg1" "msg2" "msg3" "msg4"]
                                          []))]
         (let [retry-ms 123
-              [message-chan _] (#'sqs-server/create-dedicated-queue-listeners nil 1 2 1 retry-ms)
+              [message-chan _ stop-listener-fn] (#'sqs-server/create-dedicated-queue-listeners nil 1 2 1 retry-ms)
               start-ms (System/currentTimeMillis)]
           (<!! message-chan)
           (is (>= (- (System/currentTimeMillis) start-ms) retry-ms))
-          (close! message-chan))))))
+          (stop-listener-fn))))))
 
 (deftest create-workers
   (testing "Verify workers ack processed messages"
@@ -270,7 +275,11 @@
         ; wait a bit to make sure nothing else gets grabbed
         (Thread/sleep 200)
         (is (= @tracker num-workers))
-        (sqs-server/stop-consumer consumer)))))
+        (sqs-server/stop-consumer!! consumer)))))
+
+(defn- wait-for-close!! [ch]
+  (while (<!! ch)
+    nil))
 
 (deftest ^:integration test-create-queue-listeners-integration
   (testing "Verify messages up to the buffer-size are retrieved"
@@ -278,7 +287,9 @@
       [queue-name]
       (sqs/configure-queue queue-name)
       (let [connection (sqs/mk-connection queue-name)
-            [message-chan buf] (#'sqs-server/create-queue-listeners connection 1 2 1 0)
+            [message-chan
+             ^"clojure.core.async.impl.buffers.FixedBuffer" buf
+             stop-listener-fn] (#'sqs-server/create-queue-listeners connection 1 2 1 0)
             _ (doseq [i (range 4)] (sqs/enqueue connection i))
             wait-and-check (fn [count]
                              (with-timeout 10000
@@ -292,7 +303,9 @@
         (wait-and-check 2)
         (is (false? (.full? buf)))
         (is (= (.count buf) 1))
-        (close! message-chan)))))
+        (stop-listener-fn)
+        ;; wait for listener closed
+        (wait-for-close!! message-chan)))))
 
 (deftest ^:integration consumer-happy-path
   (testing "Verify it consumes all messages properly"
@@ -308,7 +321,7 @@
         (println "total: " (- (System/currentTimeMillis) start))
         (Thread/sleep 100)
         (is (= num-messages @tracker))
-        (sqs-server/stop-consumer consumer)))))
+        (sqs-server/stop-consumer!! consumer)))))
 
 (deftest ^:integration consumer-continues-processing
   (testing "Verify it consumes messages after queue empty"
@@ -327,7 +340,7 @@
           (doseq [i (range num-messages)] (sqs/enqueue connection i))
           (wait-for-messages (* num-messages 2) 10000)
           (is (= (* num-messages 2) @tracker))
-          (sqs-server/stop-consumer consumer))))))
+          (sqs-server/stop-consumer!! consumer))))))
 
 (deftest ^:integration stop-consumer
   (testing "Verify stop-consumer closes channels"
@@ -336,11 +349,11 @@
       (sqs/configure-queue queue-name)
       ;; Work with a test queue.
       (let [consumer (sqs-server/start-consumer queue-name compute)]
-        (is (false? (.closed? (:message-channel consumer))))
-        (is (false? (.closed? (:done-channel consumer))))
-        (sqs-server/stop-consumer consumer)
-        (is (true? (.closed? (:message-channel consumer))))
-        (is (true? (.closed? (:done-channel consumer))))))))
+        (is (false? (impl/closed? (:message-channel consumer))))
+        (is (false? (impl/closed? (:done-channel consumer))))
+        (sqs-server/stop-consumer!! consumer)
+        (is (true? (impl/closed? (:message-channel consumer))))
+        (is (true? (impl/closed? (:done-channel consumer))))))))
 
 (deftest ^:integration nacking-works
   (testing "Verify we can nack a message and retry"
@@ -361,7 +374,7 @@
         (wait-for-messages 2 10000)
         (Thread/sleep 100)
         (is (= 2 @tracker))
-        (sqs-server/stop-consumer consumer)))))
+        (sqs-server/stop-consumer!! consumer)))))
 
 (deftest ^:integration nacking-timeout-works
   (testing "Verify we can nack a message with a visibility timeout"
@@ -383,7 +396,7 @@
         (wait-for-messages 2 10000)
         (Thread/sleep 100)
         (is (= 2 @tracker))
-        (sqs-server/stop-consumer consumer)))))
+        (sqs-server/stop-consumer!! consumer)))))
 
 (defn- time-consumer
   [& {:keys [n num-workers num-listeners dequeue-limit] :as args}]
@@ -403,10 +416,7 @@
                        (- (System/currentTimeMillis) start)))
       (Thread/sleep 3000)
       (is (= n @tracker))
-      ;; NB These tests sometimes end in AWS NonExistentQueue exception if not all
-      ;; messages have been ack'd when the queue is deleted
-      (sqs-server/stop-consumer consumer)
-      (Thread/sleep 2000))))
+      (sqs-server/stop-consumer!! consumer))))
 
 (deftest ^:benchmark benchmark-consumer
   ;timings based on ec2 c3.xlarge
@@ -446,7 +456,7 @@
       (println "total: " (- (System/currentTimeMillis) start))
       (Thread/sleep 100)
       (is (= num-messages @tracker))
-      (sqs-server/stop-consumer consumer))))
+      (sqs-server/stop-consumer!! consumer))))
 
 (defmacro with-temporary-queue-collection
   "Create num-queues number of SQS queues and bind a vector to sym containing the
@@ -487,4 +497,4 @@
 
         ;; cleanup (physical SQS queues are deleted via `with-temporary-queues`)
         (doseq [consumer consumers]
-          (sqs-server/stop-consumer consumer))))))
+          (sqs-server/stop-consumer!! consumer))))))
