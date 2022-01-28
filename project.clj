@@ -25,8 +25,6 @@
 
   :profiles {:dev {:global-vars {*warn-on-reflection* true}
                    :dependencies [[http-kit "2.5.3"]
-                                  [com.cemerick/bandalore "0.0.6"
-                                   :exclusions [com.amazonaws/aws-java-sdk]]
                                   [com.climate/claypoole "1.1.4"]]}}
 
   :plugins [[lein-ancient "0.7.0"]]

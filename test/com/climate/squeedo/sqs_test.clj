@@ -18,7 +18,7 @@
     [com.climate.squeedo.test-utils :refer [generate-queue-name with-temporary-queues]]
     [clojure.tools.reader.edn :as edn]
     [cheshire.core :as json]
-    [cemerick.bandalore :as band])
+    [com.climate.squeedo.sqs-extra :as sqs-extra])
   (:import
     (com.amazonaws.services.sqs.model
       QueueDoesNotExistException)))
@@ -96,7 +96,7 @@
       (sqs/configure-queue queue-name)
       (let [{:keys [client]} (sqs/mk-connection queue-name)]
         ;; test that we can access the queue's attributes
-        (is (-> (band/queue-attrs client queue-name)
+        (is (-> (sqs-extra/queue-attrs client queue-name)
                 (get "QueueArn")
                 (not-empty)))))))
 
@@ -106,12 +106,12 @@
     (testing "set attributes on queue"
       (sqs/configure-queue queue-name :queue-attributes {"VisibilityTimeout" "9"})
       (let [{:keys [client] :as conn} (sqs/mk-connection queue-name)]
-        (is (= "9" (get (band/queue-attrs client queue-name) "VisibilityTimeout"))))
+        (is (= "9" (get (sqs-extra/queue-attrs client queue-name) "VisibilityTimeout"))))
 
       ;; now change the attributes...
       (sqs/configure-queue queue-name :queue-attributes {"VisibilityTimeout" "42"})
       (let [{:keys [client] :as conn} (sqs/mk-connection queue-name)]
-        (is (= "42" (get (band/queue-attrs client queue-name) "VisibilityTimeout"))))))
+        (is (= "42" (get (sqs-extra/queue-attrs client queue-name) "VisibilityTimeout"))))))
 
   (testing "configure queue with dead letter queue"
     (with-temporary-queues
@@ -121,25 +121,25 @@
       (is (sqs/mk-connection dl-queue-name))
       (let [{:keys [client queue-url] :as conn} (sqs/mk-connection queue-name)]
         (is (= {"maxReceiveCount"     3
-                "deadLetterTargetArn" (get (band/queue-attrs client dl-queue-name) "QueueArn")}
+                "deadLetterTargetArn" (get (sqs-extra/queue-attrs client dl-queue-name) "QueueArn")}
                (json/decode
-                 (get (band/queue-attrs client queue-name) "RedrivePolicy")))))
+                 (get (sqs-extra/queue-attrs client queue-name) "RedrivePolicy")))))
 
       (testing "configure dead letter queue attributes"
         ;; ensure neither queue has value we will assert
         (let [{:keys [client] :as conn} (sqs/mk-connection queue-name)]
-          (is (not= "80" (get (band/queue-attrs client queue-name) "VisibilityTimeout"))))
+          (is (not= "80" (get (sqs-extra/queue-attrs client queue-name) "VisibilityTimeout"))))
         (let [{:keys [client] :as conn} (sqs/mk-connection dl-queue-name)]
-          (is (not= "80" (get (band/queue-attrs client dl-queue-name) "VisibilityTimeout"))))
+          (is (not= "80" (get (sqs-extra/queue-attrs client dl-queue-name) "VisibilityTimeout"))))
 
         (sqs/configure-queue queue-name
                              :dead-letter dl-queue-name
                              :dead-letter-queue-attributes {"VisibilityTimeout" "80"})
 
         (let [{:keys [client] :as conn} (sqs/mk-connection queue-name)]
-          (is (not= "80" (get (band/queue-attrs client queue-name) "VisibilityTimeout"))))
+          (is (not= "80" (get (sqs-extra/queue-attrs client queue-name) "VisibilityTimeout"))))
         (let [{:keys [client] :as conn} (sqs/mk-connection dl-queue-name)]
-          (is (= "80" (get (band/queue-attrs client dl-queue-name) "VisibilityTimeout"))))))
+          (is (= "80" (get (sqs-extra/queue-attrs client dl-queue-name) "VisibilityTimeout"))))))
 
     (testing "where dead letter queue is an existing queue"
       (with-temporary-queues
@@ -150,9 +150,9 @@
         (sqs/configure-queue queue-name :dead-letter dl-queue-name)
         (let [{:keys [client queue-url] :as conn} (sqs/mk-connection queue-name)]
           (is (= {"maxReceiveCount"     3
-                  "deadLetterTargetArn" (get (band/queue-attrs client dl-queue-name) "QueueArn")}
+                  "deadLetterTargetArn" (get (sqs-extra/queue-attrs client dl-queue-name) "QueueArn")}
                  (json/decode
-                   (get (band/queue-attrs client queue-name) "RedrivePolicy")))))))))
+                   (get (sqs-extra/queue-attrs client queue-name) "RedrivePolicy")))))))))
 
 (deftest ^:integration test-multiple-formats
   (with-temporary-queues
@@ -265,12 +265,12 @@
     [queue-name]
     (sqs/configure-queue queue-name)
     (testing "supplying the client to use to make the connection utilizes my supplied client"
-      (let [my-client (band/create-client)
+      (let [my-client (sqs-extra/create-client)
             result-connection (sqs/mk-connection queue-name :client my-client)]
         (is (= my-client (:client result-connection)))))
     (testing "not supplying the client to use to make the connection creates a new one"
       ;; Really just validating that AmazonSQSClient's equality is identity based.
-      (let [my-client (band/create-client)
+      (let [my-client (sqs-extra/create-client)
             result-connection (sqs/mk-connection queue-name)]
         (is (not= my-client (:client result-connection)))))))
 

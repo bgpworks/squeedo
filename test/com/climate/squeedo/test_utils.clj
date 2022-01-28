@@ -1,7 +1,7 @@
 (ns com.climate.squeedo.test-utils
   (:require
-    [clojure.tools.logging :as log]
-    [cemerick.bandalore :as bandalore]))
+   [clojure.tools.logging :as log]
+   [com.climate.squeedo.sqs-extra :as sqs-extra]))
 
 (defn generate-queue-name
   []
@@ -18,8 +18,8 @@
 (defn destroy-queue
   [client queue-name]
   (try
-    (let [url (bandalore/create-queue client queue-name)]
-      (bandalore/delete-queue client url)
+    (let [url (sqs-extra/create-queue client queue-name)]
+      (sqs-extra/delete-queue client url)
       (log/infof "Deleted testing queue %s" queue-name))
     (catch Exception e
       (log/warnf e "Failed to delete testing queue %s" queue-name))))
@@ -33,5 +33,5 @@
      (try
        ~@body
        (finally
-         (let [client# (bandalore/create-client)]
+         (let [client# (sqs-extra/create-client)]
            (dorun (map (partial destroy-queue client#) ~queue-syms)))))))
