@@ -16,37 +16,8 @@
   (:require
    [clojure.core.async :as async :refer [close! go-loop thread >! <! <!! chan buffer timeout]]
    [clojure.tools.logging :as log]
+   [com.climate.squeedo.async-util :as async-util]
    [com.climate.squeedo.sqs :as sqs]))
-
-(defn- onto-chan-ret!
-  "like core.async/onto-chan! except that
-   a) not closing ch and
-   b) value of returning channel is true unless ch is already closed."
-  [ch coll]
-  (go-loop [vs (seq coll)]
-    (if vs
-      (if (>! ch (first vs))
-        (recur (next vs))
-        ;; closed
-        false)
-      ;; all pushed.
-      true)))
-
-(defn- wait-all-close
-  "Returns a channel that closes when all the given channels have closed."
-  [chans]
-  (let [co (async/chan 1 (filter nil?))]
-    (async/pipe (async/merge chans)
-                co)
-    co))
-
-(defn- close-on-close!
-  "Close `ch-to-close` once `watch-ch` is closed."
-  [watch-ch ch-to-close]
-  (async/go-loop []
-    (if (nil? (<! watch-ch))
-      (close! ch-to-close)
-      (recur))))
 
 (defn- dequeue [connection dequeue-limit]
   (try
@@ -64,7 +35,7 @@
             (log/errorf err "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
             (<! (timeout exceptional-poll-delay-ms))
             (recur)))
-        (when (and (<! (onto-chan-ret! message-chan messages))
+        (when (and (<! (async-util/onto-chan-ret! message-chan messages))
                    (not (is-stopped-fn)))
           (recur))))))
 
@@ -72,7 +43,7 @@
   (-> (repeatedly num-listeners
                   create-listener-fn)
       (vec)
-      (wait-all-close)))
+      (async-util/wait-all-close)))
 
 (defn- create-queue-helper [buffer-size num-listeners create-listener-fn]
   (let [stopped?_ (atom false)
@@ -87,7 +58,7 @@
                                                   (create-listener-fn message-chan
                                                                       is-stopped-fn)))]
     ;; close message-chan when all listeners are returned.
-    (close-on-close! listener-done-chan message-chan)
+    (async-util/close-on-close! listener-done-chan message-chan)
     [message-chan buf stop-fn]))
 
 (defn- create-queue-listeners
@@ -116,7 +87,7 @@
                 (log/errorf err "Encountered exception dequeueing.  Waiting %d ms before trying again." exceptional-poll-delay-ms)
                 (Thread/sleep exceptional-poll-delay-ms)
                 (recur)))
-            (when (and (<!! (onto-chan-ret! message-chan messages))
+            (when (and (<!! (async-util/onto-chan-ret! message-chan messages))
                        (not (is-stopped-fn)))
               (recur)))))
       (close! finish-chan))
@@ -134,27 +105,27 @@
                          (dedicated-queue-listener connection dequeue-limit exceptional-poll-delay-ms message-chan is-stopped-fn))))
 
 (defn- worker
-  [work-token-chan message-chan compute done-chan]
+  [work-token-chan message-chan compute worker-resp-chan]
   (go-loop []
     (>! work-token-chan :token)
     (when-let [message (<! message-chan)]
-      (let [res-chan (chan 1)]
+      (let [res-chan (async-util/auto-closing-chan)]
         (try
           (compute message res-chan)
           (catch Throwable _
             (>! res-chan (assoc message :nack true))))
-        (>! done-chan res-chan))
+        (>! worker-resp-chan res-chan))
       (recur))))
 
 (defn- worker-pool
   "Returns a channel that closes when all workers are returned.
   It may not mean that all jobs are done, as a worker may dispatch a asynchronous job."
-  [worker-size work-token-chan message-chan compute done-chan]
+  [worker-size work-token-chan message-chan compute worker-resp-chan]
   (-> (repeatedly worker-size
                   (fn []
-                    (worker work-token-chan message-chan compute done-chan)))
+                    (worker work-token-chan message-chan compute worker-resp-chan)))
       (vec)
-      (wait-all-close)))
+      (async-util/wait-all-close)))
 
 (defn- try-ack
   "Handle exception to keep acker running.
@@ -172,15 +143,12 @@
 (defn- acker
   [connection work-token-chan done-chan]
   (go-loop []
-    (when-let [message-ch (<! done-chan)]
-      ;; TODO: long running async job blocks whole workers.
-      (let [message (<! message-ch)]
-        ;; free up the work-token-chan
-        (<! work-token-chan)
-        ;; (n)ack the message
-        (when message
-          (try-ack connection message)
-          (close! message-ch)))
+    (when-let [message (<! done-chan)]
+      ;; free up the work-token-chan
+      (<! work-token-chan)
+      ;; (n)ack the message
+      (when message
+        (try-ack connection message))
       (recur))))
 
 (defn- acker-pool
@@ -190,55 +158,55 @@
                   (fn []
                     (acker connection work-token-chan done-chan)))
       (vec)
-      (wait-all-close)))
+      (async-util/wait-all-close)))
 
 (defn- create-workers
   "Create workers to run the compute function. Workers are expected to be CPU bound or handle all IO in an asynchronous
   manner. "
   [connection worker-size max-concurrent-work message-chan compute]
   (let [done-chan (chan worker-size)
+        worker-resp-chan (chan worker-size)
         ;; the work-token-channel ensures we only have a fixed numbers of messages processed at one time
         work-token-chan (chan max-concurrent-work)
-        worker-done-chan (worker-pool worker-size work-token-chan message-chan compute done-chan)
+        worker-done-chan (worker-pool worker-size work-token-chan message-chan compute worker-resp-chan)
         ack-done-chan (acker-pool connection worker-size work-token-chan done-chan)]
-    ;; close done-chan when all workers are returned.
-    (close-on-close! worker-done-chan done-chan)
+    (async-util/pipes worker-resp-chan done-chan)
+    ;; close worker-resp-chan when all workers are returned.
+    (async-util/close-on-close! worker-done-chan worker-resp-chan)
     {:done-chan done-chan
      :ack-done-chan ack-done-chan}))
 
-(defn- dedicated-worker [message-chan compute done-chan]
+(defn- dedicated-worker [message-chan compute worker-resp-chan]
   (let [finish-chan (chan)]
     (thread
       (loop []
         (when-let [message (<!! message-chan)]
-          (let [res-chan (chan 1)]
+          (let [res-chan (async-util/auto-closing-chan)]
             (try
               (compute message res-chan)
               (catch Throwable _
                 (async/>!! res-chan (assoc message :nack true))))
             ;; may use put! not to block here. but what's the good point of processing another jobs when reporting is delaying.
-            (async/>!! done-chan res-chan))
+            (async/>!! worker-resp-chan res-chan))
           (recur)))
       (close! finish-chan))
     finish-chan))
 
-(defn- dedicated-worker-pool [worker-size message-chan compute done-chan]
+(defn- dedicated-worker-pool [worker-size message-chan compute worker-resp-chan]
   (-> (repeatedly worker-size
                   (fn []
-                    (dedicated-worker message-chan compute done-chan)))
+                    (dedicated-worker message-chan compute worker-resp-chan)))
       (vec)
-      (wait-all-close)))
+      (async-util/wait-all-close)))
 
 (defn- dedicated-acker
   [connection done-chan]
   (let [finish-chan (chan)]
     (thread
       (loop []
-        (when-let [message-ch (async/<!! done-chan)]
+        (when-let [message (async/<!! done-chan)]
           ;; (n)ack the message
-          (when-let [message (async/<!! message-ch)]
-            (try-ack connection message)
-            (close! message-ch))
+          (try-ack connection message)
           (recur)))
       (close! finish-chan))
     finish-chan))
@@ -250,18 +218,20 @@
                   (fn []
                     (dedicated-acker connection done-chan)))
       (vec)
-      (wait-all-close)))
+      (async-util/wait-all-close)))
 
 (defn- create-dedicated-workers
   "Create workers to run the compute function. It does not respect `worker-size` parameter and only respect `max-concurrent-work` for implemetation simplicity"
   [connection worker-count max-concurrent-work message-chan compute]
   (let [done-chan (chan worker-count)
-        worker-done-chan (dedicated-worker-pool max-concurrent-work message-chan compute done-chan)
+        worker-resp-chan (chan worker-count)
+        worker-done-chan (dedicated-worker-pool max-concurrent-work message-chan compute worker-resp-chan)
         ;; TODO: convert back to non-dedicated-acker-pool
         acker-pool-size 2
         ack-done-chan (dedicated-acker-pool connection acker-pool-size done-chan)]
-    ;; close done-chan when all workers are returned.
-    (close-on-close! worker-done-chan done-chan)
+    (async-util/pipes worker-resp-chan done-chan)
+    ;; close worker-resp-chan when all workers are returned.
+    (async-util/close-on-close! worker-done-chan worker-resp-chan)
     {:done-chan done-chan
      :ack-done-chan ack-done-chan}))
 

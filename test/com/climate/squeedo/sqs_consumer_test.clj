@@ -17,7 +17,7 @@
     [clojure.core.async.impl.protocols :as impl]
     [org.httpkit.client]
     [com.climate.squeedo.sqs :as sqs]
-    [com.climate.squeedo.test-utils :refer [with-temporary-queues]]
+    [com.climate.squeedo.test-utils :refer [with-temporary-queues with-timeout]]
     [com.climate.squeedo.sqs-consumer :as sqs-server]
     [com.climate.claypoole :as cp])
   (:import
@@ -30,17 +30,6 @@
   (f))
 
 (use-fixtures :each before)
-
-(defmacro with-timeout
-  [msec & body]
-  `(let [f# (future (do ~@body))
-         v# (gensym)
-         result# (deref f# ~msec v#)]
-     (if (= v# result#)
-       (do
-         (future-cancel f#)
-         (throw (TimeoutException.)))
-       result#)))
 
 (defn async-get [url message channel compute-more-fn]
   (org.httpkit.client/get url (fn [r] (go

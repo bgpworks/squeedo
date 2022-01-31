@@ -1,7 +1,9 @@
 (ns com.climate.squeedo.test-utils
   (:require
    [clojure.tools.logging :as log]
-   [com.climate.squeedo.sqs-extra :as sqs-extra]))
+   [com.climate.squeedo.sqs-extra :as sqs-extra])
+  (:import
+   [java.util.concurrent TimeoutException]))
 
 (defn generate-queue-name
   []
@@ -35,3 +37,14 @@
        (finally
          (let [client# (sqs-extra/create-client)]
            (dorun (map (partial destroy-queue client#) ~queue-syms)))))))
+
+(defmacro with-timeout
+  [msec & body]
+  `(let [f# (future (do ~@body))
+         v# (gensym)
+         result# (deref f# ~msec v#)]
+     (if (= v# result#)
+       (do
+         (future-cancel f#)
+         (throw (TimeoutException.)))
+       result#)))
