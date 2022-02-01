@@ -10,7 +10,7 @@
 ;; "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 ;; or implied.  See the License for the specific language governing permissions
 ;; and limitations under the License.
-(defproject org.clojars.bgpworks/squeedo "1.1.7"
+(defproject org.clojars.bgpworks/squeedo "1.1.8-SNAPSHOT"
   :description "Squeedo: The sexiest message consumer ever (™)"
   :url "http://github.com/bgpworks/squeedo/"
   :min-lein-version "2.0.0"
